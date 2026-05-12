@@ -206,30 +206,38 @@ But the verbosity is real. A single GPU-NIC pair is ~15 lines of YAML. Four pair
 
 This gap widens further in environments with complex networking. On our IBM Cloud GPU cluster, each NIC sits on a separate rail subnet (10.0.0.0/16 through 10.7.0.0/16) with its own gateway -- a rail-isolated network architecture where each GPU-NIC pair communicates exclusively within its own subnet:
 
+```mermaid
+graph TD
+    subgraph supernet["Cross-Rail Supernet · 10.0.0.0/13"]
+        subgraph r0["Rail 0 · 10.0.0.0/16"]
+            GW0["GW 10.0.0.1"] --- SW0[Switch]
+            SW0 --- N1_0["Node 1 · mlx5_7"]
+            SW0 --- N2_0["Node 2 · mlx5_7"]
+            SW0 --- N3_0["Node 3 · mlx5_7"]
+            SW0 --- N4_0["Node 4 · mlx5_7"]
+        end
+        subgraph r1["Rail 1 · 10.1.0.0/16"]
+            GW1["GW 10.1.0.1"] --- SW1[Switch]
+            SW1 --- N1_1["Node 1 · mlx5_6"]
+            SW1 --- N2_1["Node 2 · mlx5_6"]
+            SW1 --- N3_1["Node 3 · mlx5_6"]
+            SW1 --- N4_1["Node 4 · mlx5_6"]
+        end
+        subgraph r7["··· Rail 7 · 10.7.0.0/16"]
+            GW7["GW 10.7.0.1"] --- SW7[Switch]
+            SW7 --- N1_7["Node 1 · mlx5_0"]
+            SW7 --- N2_7["Node 2 · mlx5_0"]
+            SW7 --- N3_7["Node 3 · mlx5_0"]
+            SW7 --- N4_7["Node 4 · mlx5_0"]
+        end
+    end
+
+    style supernet fill:none,stroke:#666,stroke-dasharray:5 5
+    style r0 fill:#e8f4fd,stroke:#2196F3
+    style r1 fill:#e8f8e8,stroke:#4CAF50
+    style r7 fill:#fff3e0,stroke:#FF9800
 ```
-  IBM Cloud Rail-Isolated Network Architecture
-  =============================================
-
-  Rail 0 (10.0.0.0/16)          Rail 1 (10.1.0.0/16)          ...  Rail 7 (10.7.0.0/16)
-  ┌──────────────────┐          ┌──────────────────┐               ┌──────────────────┐
-  │   GW 10.0.0.1    │          │   GW 10.1.0.1    │               │   GW 10.7.0.1    │
-  └────────┬─────────┘          └────────┬─────────┘               └────────┬─────────┘
-           │                             │                                  │
-     ┌─────┴─────┐                 ┌─────┴─────┐                     ┌─────┴─────┐
-     │  Switch   │                 │  Switch   │                     │  Switch   │
-     └─────┬─────┘                 └─────┬─────┘                     └─────┬─────┘
-     ┌─────┴─────────────┐         ┌─────┴─────────────┐             ┌─────┴─────────────┐
-     │  Node 1: mlx5_7   │         │  Node 1: mlx5_6   │             │  Node 1: mlx5_0   │
-     │  Node 2: mlx5_7   │         │  Node 2: mlx5_6   │             │  Node 2: mlx5_0   │
-     │  Node 3: mlx5_7   │         │  Node 3: mlx5_6   │             │  Node 3: mlx5_0   │
-     │  Node 4: mlx5_7   │         │  Node 4: mlx5_6   │             │  Node 4: mlx5_0   │
-     └───────────────────┘         └───────────────────┘             └───────────────────┘
-
-  Each rail: one /16 subnet, one gateway, one NIC per node.
-  Cross-rail traffic routes through the supernet (10.0.0.0/13).
-```
-
-*[TODO: Replace with proper diagram]*
+*Each rail is an isolated /16 subnet with its own gateway. Cross-rail traffic routes through the supernet (10.0.0.0/13).*
 
 This rail-isolated architecture made sense for distributed training with NCCL, where collective operations like all-reduce naturally align to rails -- each GPU communicates with its peer GPU on other nodes through the same-rail NIC, and traffic stays within one subnet. Cross-rail communication wasn't a priority because the communication pattern matched the network topology.
 
@@ -305,7 +313,7 @@ spec:
 
 Each generated ResourceClaimTemplate includes the `pcieRoot` matching constraint and rail-specific NIC configuration (CEL selector for rail subnet, opaque config with routing rules and MTU).
 
-**Important:** This webhook is specific to rail-aligned network environments. On a bare metal cluster with a flat RDMA fabric, you don't need it -- add ResourceClaimTemplates directly to your deployment values.
+**Important:** This webhook was built for rail-aligned network environments, but it also applies to environments with flat PCIe topology -- such as AKS GPU nodes, where all GPUs and NICs appear under the same PCIe root in sysfs. In those environments, DRA's `pcieRoot` matchAttribute constraint can't distinguish GPU-NIC pairs (everything resolves to the same root), so the webhook enables manual device designation by the sysadmin. On a bare metal cluster with discoverable PCIe topology and a flat RDMA fabric, you don't need it -- add ResourceClaimTemplates directly to your deployment values.
 
 ---
 
@@ -499,7 +507,7 @@ resourceClaimTemplates:
 
 What the chart can't (and shouldn't have to) handle is per-rail routing configuration, rail-specific CEL selectors, and subnet-aware opaque driver config. That complexity belongs in the webhook for environments that need it. The resource suppression mechanism (nulling out `nvidia.com/gpu` and `rdma/ib` in the helmfile) is a stopgap until the chart natively supports a DRA mode that doesn't auto-inject device plugin resources.
 
-The [admission webhook](https://github.com/openshift-psap/dra-rail-admission-webhook) is not upstream -- it was built for our IBM Cloud rail-aligned networking. Clusters with simpler networking don't need it. The goal is for llm-d to natively generate DRA ResourceClaimTemplates when DRA is enabled, making the webhook unnecessary for most environments and reducing it to a bridge for complex network topologies.
+The [admission webhook](https://github.com/openshift-psap/dra-rail-admission-webhook) is not upstream -- it was built for our IBM Cloud rail-aligned networking but also covers environments with flat PCIe topology (like AKS) where `pcieRoot` constraints can't differentiate devices and manual GPU-NIC designation is needed. Clusters with discoverable PCIe topology and flat RDMA fabrics don't need it. The goal is for llm-d to natively generate DRA ResourceClaimTemplates when DRA is enabled, making the webhook unnecessary for most environments and reducing it to a bridge for complex network topologies.
 
 ---
 
